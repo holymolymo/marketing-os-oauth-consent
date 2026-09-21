@@ -27,13 +27,13 @@
     <h1>Marketing OS verbinden</h1>
     <p>Melde dich mit deinem Marketing-OS-Benutzer an. Anschließend entscheidest du ausdrücklich, ob das anfragende KI-Tool zugreifen darf.</p>
     <div id="error" class="error hidden" role="alert"></div>
+    <p id="status" role="status"></p>
 
     <form id="login" class="hidden">
       <label for="email">E-Mail</label>
       <input id="email" name="email" type="email" autocomplete="email" required>
-      <label for="password">Passwort</label>
-      <input id="password" name="password" type="password" autocomplete="current-password" required>
-      <div class="actions"><button class="primary" type="submit">Anmelden</button></div>
+      <p>Kein Passwort nötig. Wir senden dir einen Anmeldelink an die E-Mail-Adresse deines bestehenden Marketing-OS-Benutzers.</p>
+      <div class="actions"><button id="send-link" class="primary" type="submit">Anmeldelink per E-Mail senden</button></div>
     </form>
 
     <section id="consent" class="hidden">
@@ -68,49 +68,83 @@
     }
 
     async function loadConsent() {
+  consent.classList.add("hidden");
+  loginForm.classList.add("hidden");
+  errorBox.classList.add("hidden");
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) {
+    loginForm.classList.remove("hidden");
+    return;
+  }
+  if (!authorizationId) {
+    document.getElementById("status").textContent = "Angemeldet. Kehre jetzt zum Codex-Chat zurück und schreibe: Angemeldet. Die Verbindung wird anschließend separat freigegeben.";
+    return;
+  }
+  const { data, error } = await supabase.auth.oauth.getAuthorizationDetails(authorizationId);
+  if (error || !data) return showError("Diese Verbindungsanfrage ist nicht mehr gültig. Bitte starte die Verbindung im Codex-Chat neu.");
+  if (!("authorization_id" in data) && data.redirect_url) {
+    window.location.assign(data.redirect_url);
+    return;
+  }
+  document.getElementById("client-name").textContent = data.client?.name || "Unbekanntes KI-Tool";
+  document.getElementById("redirect-uri").textContent = data.redirect_uri || "–";
+  document.getElementById("scopes").textContent = data.scope?.trim() || "email";
+  consent.classList.remove("hidden");
+}
+
+let sendingLink = false;
+loginForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (sendingLink || !loginForm.reportValidity()) return;
+  sendingLink = true;
+  const button = document.getElementById("send-link");
+  button.disabled = true;
+  errorBox.classList.add("hidden");
+  document.getElementById("status").textContent = "";
+  try {
+    const email = document.getElementById("email").value.trim();
+    const { error } = await supabase.auth.signInWithOtp({
+      email,
+      options: {
+        shouldCreateUser: false,
+        emailRedirectTo: "https://holymolymo.github.io/marketing-os-oauth-consent/"
+      }
+    });
+    if (error) throw error;
+    document.getElementById("status").textContent = "Anmeldelink angefordert. Prüfe dein E-Mail-Postfach und den Spam-Ordner. Öffne den Link im selben Browser, den du für Codex-Freigaben nutzt. Noch ist die Codex-Verbindung nicht hergestellt.";
+  } catch {
+    showError("Der Anmeldelink konnte nicht angefordert werden. Prüfe die E-Mail-Adresse deines bestehenden Marketing-OS-Benutzers. Bei mehreren Versuchen warte kurz und versuche es erneut.");
+    sendingLink = false;
+    button.disabled = false;
+  }
+});
+
+const approveButton = document.getElementById("approve");
+    const denyButton = document.getElementById("deny");
+    let consentSubmitted = false;
+
+    async function submitConsent(approve) {
+      if (consentSubmitted) return;
+      consentSubmitted = true;
+      approveButton.disabled = true;
+      denyButton.disabled = true;
       errorBox.classList.add("hidden");
-      if (!authorizationId) return showError("Die Verbindungsanfrage ist unvollständig. Bitte starte sie erneut in Codex.");
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) {
-        loginForm.classList.remove("hidden");
-        consent.classList.add("hidden");
-        return;
-      }
-      const { data, error } = await supabase.auth.oauth.getAuthorizationDetails(authorizationId);
-      if (error || !data) return showError(error?.message || "Die Verbindungsanfrage ist nicht mehr gültig.");
-      if (!("authorization_id" in data) && data.redirect_url) {
+      try {
+        const { data, error } = approve
+          ? await supabase.auth.oauth.approveAuthorization(authorizationId)
+          : await supabase.auth.oauth.denyAuthorization(authorizationId);
+        if (error || !data?.redirect_url) throw error || new Error("missing_redirect");
         window.location.assign(data.redirect_url);
-        return;
+      } catch {
+        consent.classList.add("hidden");
+        showError("Die Freigabe konnte nicht abgeschlossen werden. Diese Anfrage bitte nicht erneut bestätigen. Starte die Verbindung in Codex neu; bei wiederholtem Fehler muss der Anmeldeablauf geprüft werden.");
       }
-      document.getElementById("client-name").textContent = data.client?.name || "Unbekanntes KI-Tool";
-      document.getElementById("redirect-uri").textContent = data.redirect_uri || "–";
-      document.getElementById("scopes").textContent = data.scope?.trim() || "email";
-      loginForm.classList.add("hidden");
-      consent.classList.remove("hidden");
     }
 
-    loginForm.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const email = document.getElementById("email").value;
-      const password = document.getElementById("password").value;
-      const { error } = await supabase.auth.signInWithPassword({ email, password });
-      if (error) return showError(error.message);
-      await loadConsent();
-    });
+    approveButton.addEventListener("click", () => submitConsent(true));
+    denyButton.addEventListener("click", () => submitConsent(false));
 
-    document.getElementById("approve").addEventListener("click", async () => {
-      const { data, error } = await supabase.auth.oauth.approveAuthorization(authorizationId);
-      if (error || !data?.redirect_url) return showError(error?.message || "Freigabe fehlgeschlagen.");
-      window.location.assign(data.redirect_url);
-    });
-
-    document.getElementById("deny").addEventListener("click", async () => {
-      const { data, error } = await supabase.auth.oauth.denyAuthorization(authorizationId);
-      if (error || !data?.redirect_url) return showError(error?.message || "Ablehnung fehlgeschlagen.");
-      window.location.assign(data.redirect_url);
-    });
-
-    await loadConsent();
-  </script>
+    await loadConsent().catch(() => showError("Die Anmeldung konnte nicht geladen werden. Prüfe deine Verbindung und lade die Seite neu."));
+</script>
 </body>
 </html>
